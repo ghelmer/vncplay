@@ -42,11 +42,12 @@ class OptionsFrame extends Frame
     "Restricted colors",
     "Mouse buttons 2 and 3",
     "View only",
+    "Scale remote cursor",
     "Share desktop",
   };
 
   static String[][] values = {
-    { "Raw", "RRE", "CoRRE", "Hextile", "Zlib", "Tight" },
+    { "Auto", "Raw", "RRE", "CoRRE", "Hextile", "Zlib", "Tight", "ZRLE" },
     { "Default", "1", "2", "3", "4", "5", "6", "7", "8", "9" },
     { "JPEG off", "0", "1", "2", "3", "4", "5", "6", "7", "8", "9" },
     { "Enable", "Ignore", "Disable" },
@@ -54,6 +55,7 @@ class OptionsFrame extends Frame
     { "Yes", "No" },
     { "Normal", "Reversed" },
     { "Yes", "No" },
+    { "No", "50%", "75%", "125%", "150%" },
     { "Yes", "No" },
   };
 
@@ -66,7 +68,8 @@ class OptionsFrame extends Frame
     eightBitColorsIndex  = 5,
     mouseButtonIndex     = 6,
     viewOnlyIndex        = 7,
-    shareDesktopIndex    = 8;
+    scaleCursorIndex     = 8,
+    shareDesktopIndex    = 9;
 
   Label[] labels = new Label[names.length];
   Choice[] choices = new Choice[names.length];
@@ -78,20 +81,22 @@ class OptionsFrame extends Frame
   // The actual data which other classes look at:
   //
 
-  int[] encodings = new int[20];
-  int nEncodings;
-
+  int preferredEncoding;
   int compressLevel;
   int jpegQuality;
-
-  boolean eightBitColors;
-
+  boolean useCopyRect;
   boolean requestCursorUpdates;
   boolean ignoreCursorUpdates;
+
+  boolean eightBitColors;
 
   boolean reverseMouseButtons2And3;
   boolean shareDesktop;
   boolean viewOnly;
+  int scaleCursor;
+
+  boolean autoScale;
+  int scalingFactor;
 
   //
   // Constructor.  Set up the labels and choices from the names and values
@@ -138,7 +143,7 @@ class OptionsFrame extends Frame
 
     // Set up defaults
 
-    choices[encodingIndex].select("Tight");
+    choices[encodingIndex].select("Auto");
     choices[compressLevelIndex].select("Default");
     choices[jpegQualityIndex].select("6");
     choices[cursorUpdatesIndex].select("Enable");
@@ -146,6 +151,7 @@ class OptionsFrame extends Frame
     choices[eightBitColorsIndex].select("No");
     choices[mouseButtonIndex].select("Normal");
     choices[viewOnlyIndex].select("No");
+    choices[scaleCursorIndex].select("No");
     choices[shareDesktopIndex].select("Yes");
 
     // But let them be overridden by parameters
@@ -157,6 +163,35 @@ class OptionsFrame extends Frame
 	  if (s.equalsIgnoreCase(values[i][j])) {
 	    choices[i].select(j);
 	  }
+	}
+      }
+    }
+
+    // FIXME: Provide some sort of GUI for "Scaling Factor".
+
+    autoScale = false;
+    scalingFactor = 100;
+    String s = viewer.readParameter("Scaling Factor", false);
+    if (s != null) {
+      if (s.equalsIgnoreCase("Auto")) {
+	autoScale = true;
+      } else {
+	// Remove the '%' char at the end of string if present.
+	if (s.charAt(s.length() - 1) == '%') {
+	  s = s.substring(0, s.length() - 1);
+	}
+	// Convert to an integer.
+	try {
+	  scalingFactor = Integer.parseInt(s);
+	}
+	catch (NumberFormatException e) {
+	  scalingFactor = 100;
+	}
+	// Make sure scalingFactor is in the range of [1..1000].
+	if (scalingFactor < 1) {
+	  scalingFactor = 1;
+	} else if (scalingFactor > 1000) {
+	  scalingFactor = 1000;
 	}
       }
     }
@@ -182,19 +217,17 @@ class OptionsFrame extends Frame
   //
   // setEncodings looks at the encoding, compression level, JPEG
   // quality level, cursor shape updates and copyRect choices and sets
-  // the encodings array appropriately. It also calls the VncViewer's
-  // setEncodings method to send a message to the RFB server if
-  // necessary.
+  // corresponding variables properly. Then it calls the VncViewer's
+  // setEncodings method to send a SetEncodings message to the RFB
+  // server.
   //
 
   void setEncodings() {
-    nEncodings = 0;
-    if (choices[useCopyRectIndex].getSelectedItem().equals("Yes")) {
-      encodings[nEncodings++] = RfbProto.EncodingCopyRect;
-    }
+    useCopyRect = choices[useCopyRectIndex].getSelectedItem().equals("Yes");
 
-    int preferredEncoding = RfbProto.EncodingRaw;
+    preferredEncoding = RfbProto.EncodingRaw;
     boolean enableCompressLevel = false;
+    boolean enableQualityLevel = false;
 
     if (choices[encodingIndex].getSelectedItem().equals("RRE")) {
       preferredEncoding = RfbProto.EncodingRRE;
@@ -202,76 +235,49 @@ class OptionsFrame extends Frame
       preferredEncoding = RfbProto.EncodingCoRRE;
     } else if (choices[encodingIndex].getSelectedItem().equals("Hextile")) {
       preferredEncoding = RfbProto.EncodingHextile;
+    } else if (choices[encodingIndex].getSelectedItem().equals("ZRLE")) {
+      preferredEncoding = RfbProto.EncodingZRLE;
     } else if (choices[encodingIndex].getSelectedItem().equals("Zlib")) {
       preferredEncoding = RfbProto.EncodingZlib;
       enableCompressLevel = true;
     } else if (choices[encodingIndex].getSelectedItem().equals("Tight")) {
       preferredEncoding = RfbProto.EncodingTight;
       enableCompressLevel = true;
-    }
-
-    encodings[nEncodings++] = preferredEncoding;
-    if (preferredEncoding != RfbProto.EncodingHextile) {
-      encodings[nEncodings++] = RfbProto.EncodingHextile;
-    }
-    if (preferredEncoding != RfbProto.EncodingTight) {
-      encodings[nEncodings++] = RfbProto.EncodingTight;
-    }
-    if (preferredEncoding != RfbProto.EncodingZlib) {
-      encodings[nEncodings++] = RfbProto.EncodingZlib;
-    }
-    if (preferredEncoding != RfbProto.EncodingCoRRE) {
-      encodings[nEncodings++] = RfbProto.EncodingCoRRE;
-    }
-    if (preferredEncoding != RfbProto.EncodingRRE) {
-      encodings[nEncodings++] = RfbProto.EncodingRRE;
+      enableQualityLevel = !eightBitColors;
+    } else if (choices[encodingIndex].getSelectedItem().equals("Auto")) {
+      preferredEncoding = -1;
+      enableQualityLevel = !eightBitColors;
     }
 
     // Handle compression level setting.
 
-    if (enableCompressLevel) {
-      labels[compressLevelIndex].setEnabled(true);
-      choices[compressLevelIndex].setEnabled(true);
-      try {
-	compressLevel =
-	  Integer.parseInt(choices[compressLevelIndex].getSelectedItem());
-      }
-      catch (NumberFormatException e) {
-	compressLevel = -1;
-      }
-      if (compressLevel >= 1 && compressLevel <= 9) {
-	encodings[nEncodings++] =
-	  RfbProto.EncodingCompressLevel0 + compressLevel;
-      } else {
-	compressLevel = -1;
-      }
-    } else {
-      labels[compressLevelIndex].setEnabled(false);
-      choices[compressLevelIndex].setEnabled(false);
+    try {
+      compressLevel =
+        Integer.parseInt(choices[compressLevelIndex].getSelectedItem());
     }
+    catch (NumberFormatException e) {
+      compressLevel = -1;
+    }
+    if (compressLevel < 1 || compressLevel > 9) {
+      compressLevel = -1;
+    }
+    labels[compressLevelIndex].setEnabled(enableCompressLevel);
+    choices[compressLevelIndex].setEnabled(enableCompressLevel);
 
     // Handle JPEG quality setting.
 
-    if (preferredEncoding == RfbProto.EncodingTight && !eightBitColors) {
-      labels[jpegQualityIndex].setEnabled(true);
-      choices[jpegQualityIndex].setEnabled(true);
-      try {
-	jpegQuality =
-	  Integer.parseInt(choices[jpegQualityIndex].getSelectedItem());
-      }
-      catch (NumberFormatException e) {
-	jpegQuality = -1;
-      }
-      if (jpegQuality >= 0 && jpegQuality <= 9) {
-	encodings[nEncodings++] =
-	  RfbProto.EncodingQualityLevel0 + jpegQuality;
-      } else {
-	jpegQuality = -1;
-      }
-    } else {
-      labels[jpegQualityIndex].setEnabled(false);
-      choices[jpegQualityIndex].setEnabled(false);
+    try {
+      jpegQuality =
+        Integer.parseInt(choices[jpegQualityIndex].getSelectedItem());
     }
+    catch (NumberFormatException e) {
+      jpegQuality = -1;
+    }
+    if (jpegQuality < 0 || jpegQuality > 9) {
+      jpegQuality = -1;
+    }
+    labels[jpegQualityIndex].setEnabled(enableQualityLevel);
+    choices[jpegQualityIndex].setEnabled(enableQualityLevel);
 
     // Request cursor shape updates if necessary.
 
@@ -279,16 +285,9 @@ class OptionsFrame extends Frame
       !choices[cursorUpdatesIndex].getSelectedItem().equals("Disable");
 
     if (requestCursorUpdates) {
-      encodings[nEncodings++] = RfbProto.EncodingXCursor;
-      encodings[nEncodings++] = RfbProto.EncodingRichCursor;
       ignoreCursorUpdates =
 	choices[cursorUpdatesIndex].getSelectedItem().equals("Ignore");
-      if (!ignoreCursorUpdates)
-	encodings[nEncodings++] = RfbProto.EncodingPointerPos;
     }
-
-    encodings[nEncodings++] = RfbProto.EncodingLastRect;
-    encodings[nEncodings++] = RfbProto.EncodingNewFBSize;
 
     viewer.setEncodings();
   }
@@ -305,7 +304,8 @@ class OptionsFrame extends Frame
       choices[eightBitColorsIndex].getSelectedItem().equals("Yes");
 
     boolean enableJPEG = !eightBitColors &&
-      choices[encodingIndex].getSelectedItem().equals("Tight");
+      (choices[encodingIndex].getSelectedItem().equals("Tight") ||
+       choices[encodingIndex].getSelectedItem().equals("Auto"));
 
     labels[jpegQualityIndex].setEnabled(enableJPEG);
     choices[jpegQualityIndex].setEnabled(enableJPEG);
@@ -328,6 +328,28 @@ class OptionsFrame extends Frame
 
     shareDesktop
       = choices[shareDesktopIndex].getSelectedItem().equals("Yes");
+
+    String scaleString = choices[scaleCursorIndex].getSelectedItem();
+    if (scaleString.endsWith("%"))
+      scaleString = scaleString.substring(0, scaleString.length() - 1);
+    try {
+      scaleCursor = Integer.parseInt(scaleString);
+    }
+    catch (NumberFormatException e) {
+      scaleCursor = 0;
+    }
+    if (scaleCursor < 10 || scaleCursor > 500) {
+      scaleCursor = 0;
+    }
+    if (requestCursorUpdates && !ignoreCursorUpdates && !viewOnly) {
+      labels[scaleCursorIndex].setEnabled(true);
+      choices[scaleCursorIndex].setEnabled(true);
+    } else {
+      labels[scaleCursorIndex].setEnabled(false);
+      choices[scaleCursorIndex].setEnabled(false);
+    }
+    if (viewer.vc != null)
+      viewer.vc.createSoftCursor(); // update cursor scaling
   }
 
 
@@ -346,13 +368,18 @@ class OptionsFrame extends Frame
 
       setEncodings();
 
+      if (source == choices[cursorUpdatesIndex]) {
+        setOtherOptions();      // update scaleCursor state
+      }
+
     } else if (source == choices[eightBitColorsIndex]) {
 
       setColorFormat();
 
     } else if (source == choices[mouseButtonIndex] ||
 	       source == choices[shareDesktopIndex] ||
-	       source == choices[viewOnlyIndex]) {
+	       source == choices[viewOnlyIndex] ||
+	       source == choices[scaleCursorIndex]) {
 
       setOtherOptions();
     }

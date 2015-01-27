@@ -1,5 +1,6 @@
 //
 //  Copyright (C) 1999 AT&T Laboratories Cambridge.  All Rights Reserved.
+//  Copyright (C) 2002-2006 Constantin Kaplinsky.  All Rights Reserved.
 //
 //  This is free software; you can redistribute it and/or modify
 //  it under the terms of the GNU General Public License as published by
@@ -26,31 +27,26 @@ import java.awt.event.*;
 
 class AuthPanel extends Panel implements ActionListener {
 
-  Label title, retry, prompt;
-  TextField password;
-  Button ok;
+  TextField passwordField;
+  Button okButton;
 
   //
   // Constructor.
   //
 
-  public AuthPanel() {
+  public AuthPanel(VncViewer viewer)
+  {
+    Label titleLabel = new Label("VNC Authentication", Label.CENTER);
+    titleLabel.setFont(new Font("Helvetica", Font.BOLD, 18));
 
-    title = new Label("VNC Authentication",Label.CENTER);
-    title.setFont(new Font("Helvetica", Font.BOLD, 18));
+    Label promptLabel = new Label("Password:", Label.CENTER);
 
-    prompt = new Label("Password:",Label.CENTER);
+    passwordField = new TextField(10);
+    passwordField.setForeground(Color.black);
+    passwordField.setBackground(Color.white);
+    passwordField.setEchoChar('*');
 
-    password = new TextField(10);
-    password.setForeground(Color.black);
-    password.setBackground(Color.white);
-    password.setEchoChar('*');
-
-    ok = new Button("OK");
-
-    retry = new Label("",Label.CENTER);
-    retry.setFont(new Font("Courier", Font.BOLD, 16));
-
+    okButton = new Button("OK");
 
     GridBagLayout gridbag = new GridBagLayout();
     GridBagConstraints gbc = new GridBagConstraints();
@@ -58,38 +54,38 @@ class AuthPanel extends Panel implements ActionListener {
     setLayout(gridbag);
 
     gbc.gridwidth = GridBagConstraints.REMAINDER;
-    gridbag.setConstraints(title,gbc);
-    add(title);
-
-    gbc.fill = GridBagConstraints.HORIZONTAL;
-    gridbag.setConstraints(retry,gbc);
-    add(retry);
+    gbc.insets = new Insets(0,0,20,0);
+    gridbag.setConstraints(titleLabel,gbc);
+    add(titleLabel);
 
     gbc.fill = GridBagConstraints.NONE;
     gbc.gridwidth = 1;
-    gridbag.setConstraints(prompt,gbc);
-    add(prompt);
+    gbc.insets = new Insets(0,0,0,0);
+    gridbag.setConstraints(promptLabel,gbc);
+    add(promptLabel);
 
-    gridbag.setConstraints(password,gbc);
-    add(password);
-    password.addActionListener(this);
+    gridbag.setConstraints(passwordField,gbc);
+    add(passwordField);
+    passwordField.addActionListener(this);
 
-    gbc.ipady = 10;
+    // gbc.ipady = 10;
     gbc.gridwidth = GridBagConstraints.REMAINDER;
     gbc.fill = GridBagConstraints.BOTH;
     gbc.insets = new Insets(0,20,0,0);
-    gbc.ipadx = 40;
-    gridbag.setConstraints(ok,gbc);
-    add(ok);
-    ok.addActionListener(this);
+    gbc.ipadx = 30;
+    gridbag.setConstraints(okButton,gbc);
+    add(okButton);
+    okButton.addActionListener(this);
   }
 
   //
-  // Move keyboard focus to the password text field object.
+  // Move keyboard focus to the default object, that is, the password
+  // text field.
   //
 
-  public void moveFocusToPasswordField() {
-    password.requestFocus();
+  public void moveFocusToDefaultField()
+  {
+    passwordField.requestFocus();
   }
 
   //
@@ -97,22 +93,24 @@ class AuthPanel extends Panel implements ActionListener {
   // pressed in the password text field.
   //
 
-  public synchronized void actionPerformed(ActionEvent evt) {
-    if (evt.getSource() == password || evt.getSource() == ok) {
-      password.setEnabled(false);
+  public synchronized void actionPerformed(ActionEvent evt)
+  {
+    if (evt.getSource() == passwordField || evt.getSource() == okButton) {
+      passwordField.setEnabled(false);
       notify();
     }
   }
 
   //
-  // retry().
+  // Wait for user entering a password, and return it as String.
   //
 
-  public void retry() {
-    retry.setText("Sorry. Try again.");
-    password.setEnabled(true);
-    password.setText("");
-    moveFocusToPasswordField();
+  public synchronized String getPassword() throws Exception
+  {
+    try {
+      wait();
+    } catch (InterruptedException e) { }
+    return passwordField.getText();
   }
 
 }
