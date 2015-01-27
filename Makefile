@@ -1,3 +1,7 @@
+#
+# Making the VNC applet.
+#
+
 CP = cp
 JC = javac
 JCFLAGS = -target 1.5 -source 1.5

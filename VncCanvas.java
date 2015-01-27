@@ -55,6 +55,20 @@ class VncCanvas extends Canvas
   byte[] pixels8;
   int[] pixels24;
 
+  // Update statistics.
+  long statStartTime;           // time on first framebufferUpdateRequest
+  int statNumUpdates;           // counter for FramebufferUpdate messages
+  int statNumTotalRects;        // rectangles in FramebufferUpdate messages
+  int statNumPixelRects;        // the same, but excluding pseudo-rectangles
+  int statNumRectsTight;        // Tight-encoded rectangles (including JPEG)
+  int statNumRectsTightJPEG;    // JPEG-compressed Tight-encoded rectangles
+  int statNumRectsZRLE;         // ZRLE-encoded rectangles
+  int statNumRectsHextile;      // Hextile-encoded rectangles
+  int statNumRectsRaw;          // Raw-encoded rectangles
+  int statNumRectsCopy;         // CopyRect rectangles
+  int statNumBytesEncoded;      // number of bytes in updates, as received
+  int statNumBytesDecoded;      // number of bytes, as if Raw encoding was used
+
   // ZRLE encoder's data.
   byte[] zrleBuf;
   int zrleBufLen = 0;
@@ -182,6 +196,10 @@ class VncCanvas extends Canvas
 	processLocalMouseEvent((MouseEvent) e, true);
       else throw new RuntimeException("Unknown event type " + e.getClass().getName());
     }
+  }
+
+  public VncCanvas(VncViewer v) throws IOException {
+    this(v, 0, 0);
   }
 
   public VncCanvas(VncViewer v) throws IOException {
@@ -431,6 +449,9 @@ class VncCanvas extends Canvas
     rfb.writeFramebufferUpdateRequest(0, 0, rfb.framebufferWidth,
 				      rfb.framebufferHeight, false);
 
+    resetStats();
+    boolean statsRestarted = false;
+
     //
     // main dispatch loop
     //
@@ -443,12 +464,25 @@ class VncCanvas extends Canvas
       // Process the message depending on its type.
       switch (msgType) {
       case RfbProto.FramebufferUpdate:
+
+        if (statNumUpdates == viewer.debugStatsExcludeUpdates &&
+            !statsRestarted) {
+          resetStats();
+          statsRestarted = true;
+        } else if (statNumUpdates == viewer.debugStatsMeasureUpdates &&
+                   statsRestarted) {
+          viewer.disconnect();
+        }
+
 	rfb.readFramebufferUpdate();
+	statNumUpdates++;
 
 	boolean cursorPosReceived = false;
 
 	for (int i = 0; i < rfb.updateNRects; i++) {
+
 	  rfb.readFramebufferUpdateRectHdr();
+	  statNumTotalRects++;
 	  int rx = rfb.updateRectX, ry = rfb.updateRectY;
 	  int rw = rfb.updateRectW, rh = rfb.updateRectH;
 
@@ -473,13 +507,17 @@ class VncCanvas extends Canvas
 	    continue;
 	  }
 
+          long numBytesReadBefore = rfb.getNumBytesRead();
+
           rfb.startTiming();
 
 	  switch (rfb.updateRectEncoding) {
 	  case RfbProto.EncodingRaw:
+	    statNumRectsRaw++;
 	    handleRawRect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingCopyRect:
+	    statNumRectsCopy++;
 	    handleCopyRect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingRRE:
@@ -489,15 +527,18 @@ class VncCanvas extends Canvas
 	    handleCoRRERect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingHextile:
+	    statNumRectsHextile++;
 	    handleHextileRect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingZRLE:
+	    statNumRectsZRLE++;
 	    handleZRLERect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingZlib:
             handleZlibRect(rx, ry, rw, rh);
 	    break;
 	  case RfbProto.EncodingTight:
+	    statNumRectsTight++;
 	    handleTightRect(rx, ry, rw, rh);
 	    break;
 	  default:
@@ -506,6 +547,11 @@ class VncCanvas extends Canvas
 	  }
 
           rfb.stopTiming();
+
+          statNumPixelRects++;
+          statNumBytesDecoded += rw * rh * bytesPixel;
+          statNumBytesEncoded +=
+            (int)(rfb.getNumBytesRead() - numBytesReadBefore);
 	}
 
 	boolean fullUpdateNeeded = false;
@@ -520,7 +566,7 @@ class VncCanvas extends Canvas
 	// if there is some data to receive, or if the last update
 	// included a PointerPos message.
 	if (viewer.deferUpdateRequests > 0 &&
-	    rfb.is.available() == 0 && !cursorPosReceived) {
+	    rfb.available() == 0 && !cursorPosReceived) {
 	  synchronized(rfb) {
 	    try {
 	      rfb.wait(viewer.deferUpdateRequests);
@@ -529,19 +575,20 @@ class VncCanvas extends Canvas
 	  }
 	}
 
-	// Before requesting framebuffer update, check if the pixel
-	// format should be changed. If it should, request full update
-	// instead of an incremental one.
-	if (viewer.options.eightBitColors != (bytesPixel == 1)) {
-	  setPixelFormat();
-	  fullUpdateNeeded = true;
-	}
-
         viewer.autoSelectEncodings();
 
-	rfb.writeFramebufferUpdateRequest(0, 0, rfb.framebufferWidth,
-					  rfb.framebufferHeight,
-					  !fullUpdateNeeded);
+	// Before requesting framebuffer update, check if the pixel
+	// format should be changed.
+	if (viewer.options.eightBitColors != (bytesPixel == 1)) {
+          // Pixel format should be changed.
+          setPixelFormat();
+          fullUpdateNeeded = true;
+	}
+
+        // Request framebuffer update if needed.
+        int w = rfb.framebufferWidth;
+        int h = rfb.framebufferHeight;
+        rfb.writeFramebufferUpdateRequest(0, 0, w, h, !fullUpdateNeeded);
 
 	break;
 
@@ -625,7 +672,7 @@ class VncCanvas extends Canvas
 
   void handleRRERect(int x, int y, int w, int h) throws IOException {
 
-    int nSubrects = rfb.is.readInt();
+    int nSubrects = rfb.readU32();
 
     byte[] bg_buf = new byte[bytesPixel];
     rfb.readFully(bg_buf);
@@ -676,7 +723,7 @@ class VncCanvas extends Canvas
   //
 
   void handleCoRRERect(int x, int y, int w, int h) throws IOException {
-    int nSubrects = rfb.is.readInt();
+    int nSubrects = rfb.readU32();
 
     byte[] bg_buf = new byte[bytesPixel];
     rfb.readFully(bg_buf);
@@ -757,7 +804,7 @@ class VncCanvas extends Canvas
   void handleHextileSubrect(int tx, int ty, int tw, int th)
     throws IOException {
 
-    int subencoding = rfb.is.readUnsignedByte();
+    int subencoding = rfb.readU8();
     if (rfb.rec != null) {
       rfb.rec.writeByte(subencoding);
     }
@@ -801,7 +848,7 @@ class VncCanvas extends Canvas
     if ((subencoding & rfb.HextileAnySubrects) == 0)
       return;
 
-    int nSubrects = rfb.is.readUnsignedByte();
+    int nSubrects = rfb.readU8();
     int bufsize = nSubrects * 2;
     if ((subencoding & rfb.HextileSubrectsColoured) != 0) {
       bufsize += nSubrects * bytesPixel;
@@ -876,7 +923,7 @@ class VncCanvas extends Canvas
     if (zrleInStream == null)
       zrleInStream = new ZlibInStream();
 
-    int nBytes = rfb.is.readInt();
+    int nBytes = rfb.readU32();
     if (nBytes > 64 * 1024 * 1024)
       throw new Exception("ZRLE decoder: illegal compressed data size");
 
@@ -1102,7 +1149,7 @@ class VncCanvas extends Canvas
 
   void handleZlibRect(int x, int y, int w, int h) throws Exception {
 
-    int nBytes = rfb.is.readInt();
+    int nBytes = rfb.readU32();
 
     if (zlibBuf == null || zlibBufLen < nBytes) {
       zlibBufLen = nBytes * 2;
@@ -1154,7 +1201,7 @@ class VncCanvas extends Canvas
 
   void handleTightRect(int x, int y, int w, int h) throws Exception {
 
-    int comp_ctl = rfb.is.readUnsignedByte();
+    int comp_ctl = rfb.readU8();
     if (rfb.rec != null) {
       if (rfb.recordFromBeginning ||
 	  comp_ctl == (rfb.TightFill << 4) ||
@@ -1184,7 +1231,7 @@ class VncCanvas extends Canvas
     if (comp_ctl == rfb.TightFill) {
 
       if (bytesPixel == 1) {
-	int idx = rfb.is.readUnsignedByte();
+	int idx = rfb.readU8();
 	memGraphics.setColor(colors[idx]);
 	if (rfb.rec != null) {
 	  rfb.rec.writeByte(idx);
@@ -1206,6 +1253,8 @@ class VncCanvas extends Canvas
     }
 
     if (comp_ctl == rfb.TightJpeg) {
+
+      statNumRectsTightJPEG++;
 
       // Read JPEG data.
       byte[] jpegData = new byte[rfb.readCompactLen()];
@@ -1247,12 +1296,12 @@ class VncCanvas extends Canvas
     int[] palette24 = new int[256];
     boolean useGradient = false;
     if ((comp_ctl & rfb.TightExplicitFilter) != 0) {
-      int filter_id = rfb.is.readUnsignedByte();
+      int filter_id = rfb.readU8();
       if (rfb.rec != null) {
 	rfb.rec.writeByte(filter_id);
       }
       if (filter_id == rfb.TightFilterPalette) {
-	numColors = rfb.is.readUnsignedByte() + 1;
+	numColors = rfb.readU8() + 1;
 	if (rfb.rec != null) {
 	  rfb.rec.writeByte(numColors - 1);
 	}
@@ -1669,6 +1718,24 @@ class VncCanvas extends Canvas
   public void mouseEntered(MouseEvent evt) {}
   public void mouseExited(MouseEvent evt) {}
 
+  //
+  // Reset update statistics.
+  //
+
+  void resetStats() {
+    statStartTime = System.currentTimeMillis();
+    statNumUpdates = 0;
+    statNumTotalRects = 0;
+    statNumPixelRects = 0;
+    statNumRectsTight = 0;
+    statNumRectsTightJPEG = 0;
+    statNumRectsZRLE = 0;
+    statNumRectsHextile = 0;
+    statNumRectsRaw = 0;
+    statNumRectsCopy = 0;
+    statNumBytesEncoded = 0;
+    statNumBytesDecoded = 0;
+  }
 
   //////////////////////////////////////////////////////////////////
   //
@@ -1706,14 +1773,15 @@ class VncCanvas extends Canvas
       int bytesMaskData = bytesPerRow * height;
 
       if (encodingType == rfb.EncodingXCursor) {
+	//rfb.skipBytes(6 + bytesMaskData * 2);
 	byte[] crud = new byte[6 + bytesMaskData * 2];
-	rfb.is.readFully(crud);
+	rfb.readFully(crud);
 	if (rfb.rec != null)
 	  rfb.rec.write(crud);
       } else {
 	// rfb.EncodingRichCursor
-	byte[] crud = new byte[width * height + bytesMaskData];
-	rfb.is.readFully(crud);
+	byte[] crud = new byte[width * height * bytesPixel + bytesMaskData];
+	rfb.readFully(crud);
 	if (rfb.rec != null)
 	  rfb.rec.write(crud);
       }
@@ -1756,7 +1824,7 @@ class VncCanvas extends Canvas
 
       // Read foreground and background colors of the cursor.
       byte[] rgb = new byte[6];
-      rfb.is.readFully(rgb);
+      rfb.readFully(rgb);
       if (rfb.rec != null)
 	rfb.rec.write(rgb);
       int[] colors = { (0xFF000000 | (rgb[3] & 0xFF) << 16 |
@@ -1766,12 +1834,12 @@ class VncCanvas extends Canvas
 
       // Read pixel and mask data.
       byte[] pixBuf = new byte[bytesMaskData];
-      rfb.is.readFully(pixBuf);
+      rfb.readFully(pixBuf);
       if (rfb.rec != null)
 	rfb.rec.write(pixBuf);
 
       byte[] maskBuf = new byte[bytesMaskData];
-      rfb.is.readFully(maskBuf);
+      rfb.readFully(maskBuf);
       if (rfb.rec != null)
 	rfb.rec.write(maskBuf);
 
@@ -1807,12 +1875,12 @@ class VncCanvas extends Canvas
 
       // Read pixel and mask data.
       byte[] pixBuf = new byte[width * height * bytesPixel];
-      rfb.is.readFully(pixBuf);
+      rfb.readFully(pixBuf);
       if (rfb.rec != null)
 	rfb.rec.write(pixBuf);
 
       byte[] maskBuf = new byte[bytesMaskData];
-      rfb.is.readFully(maskBuf);
+      rfb.readFully(maskBuf);
       if (rfb.rec != null)
 	rfb.rec.write(maskBuf);
 
