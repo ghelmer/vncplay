@@ -1404,4 +1404,33 @@ class RfbProto {
     }
   }
 
+  final int available() throws IOException {
+    return is.available();
+  }
+
+  // FIXME: DataInputStream::skipBytes() is not guaranteed to skip
+  // exactly n bytes. Probably we don't want to use this method.
+  final int skipBytes(int n) throws IOException {
+    int r = is.skipBytes(n);
+    numBytesRead += r;
+    return r;
+  }
+
+  final int readU8() throws IOException {
+    int r = is.readUnsignedByte();
+    numBytesRead++;
+    return r;
+  }
+
+  final int readU16() throws IOException {
+    int r = is.readUnsignedShort();
+    numBytesRead += 2;
+    return r;
+  }
+
+  final int readU32() throws IOException {
+    int r = is.readInt();
+    numBytesRead += 4;
+    return r;
+  }
 }

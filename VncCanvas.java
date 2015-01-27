@@ -202,10 +202,6 @@ class VncCanvas extends Canvas
     this(v, 0, 0);
   }
 
-  public VncCanvas(VncViewer v) throws IOException {
-    this(v, 0, 0);
-  }
-
   //
   // Callback methods to determine geometry of our Component.
   //
