@@ -45,6 +45,10 @@ class SessionRecorder {
     buffer = new byte[bufferSize];
   }
 
+  public long getStartTime() {
+    return startTime;
+  }
+
   public SessionRecorder(String name) throws IOException {
     this(name, 65536);
   }

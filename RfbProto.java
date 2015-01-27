@@ -80,6 +80,11 @@ class RfbProto {
   String host;
   int port;
   Socket sock;
+
+  private PipedInputStream pipeIs;
+  PipedOutputStream pipeOs;
+  int bytesProcessed = 0;
+
   DataInputStream is;
   OutputStream os;
   SessionRecorder rec;
@@ -126,30 +131,40 @@ class RfbProto {
     host = h;
     port = p;
 
-    if (viewer.socketFactory == null) {
-      sock = new Socket(host, port);
+    if (h.equals("pipe-magic")) {
+      pipeIs = new PipedInputStream();
+      pipeOs = new PipedOutputStream(pipeIs);
+      CountingInputStream cis = new CountingInputStream(this, pipeIs);
+
+      is = new DataInputStream(cis);
+      os = new FileOutputStream(new File("/dev/null"));
     } else {
-      try {
-	Class factoryClass = Class.forName(viewer.socketFactory);
-	SocketFactory factory = (SocketFactory)factoryClass.newInstance();
-	if (viewer.inAnApplet)
-	  sock = factory.createSocket(host, port, viewer);
-	else
-	  sock = factory.createSocket(host, port, viewer.mainArgs);
-      } catch(Exception e) {
-	e.printStackTrace();
-	throw new IOException(e.getMessage());
+      if (viewer.socketFactory == null) {
+	sock = new Socket(host, port);
+      } else {
+        try {
+	  Class factoryClass = Class.forName(viewer.socketFactory);
+	  SocketFactory factory = (SocketFactory)factoryClass.newInstance();
+	  if (viewer.inAnApplet)
+	    sock = factory.createSocket(host, port, viewer);
+	  else
+	    sock = factory.createSocket(host, port, viewer.mainArgs);
+        } catch(Exception e) {
+	  e.printStackTrace();
+	  throw new IOException(e.getMessage());
+        }
       }
+      is = new DataInputStream(new BufferedInputStream(sock.getInputStream(),
+						       16384));
+      os = sock.getOutputStream();
     }
-    is = new DataInputStream(new BufferedInputStream(sock.getInputStream(),
-						     16384));
-    os = sock.getOutputStream();
   }
 
 
   synchronized void close() {
     try {
-      sock.close();
+      if (sock != null)
+	sock.close();
       closed = true;
       System.out.println("RFB socket closed");
       if (rec != null) {
@@ -302,6 +317,8 @@ class RfbProto {
 
     zlibWarningShown = false;
     tightWarningShown = false;
+
+    rec.flush();
   }
 
   //
@@ -325,6 +342,47 @@ class RfbProto {
     framebufferHeight = height;
   }
 
+  private class CountingInputStream extends InputStream {
+    private int _lastRead;
+    private RfbProto _rfb;
+    private InputStream _is;
+
+    public CountingInputStream(RfbProto rfb, InputStream is) {
+      super();
+      _rfb = rfb;
+      _is = is;
+      _lastRead = 0;
+    }
+
+    private synchronized void flushProcessed() {
+      synchronized (_rfb) {
+	_rfb.bytesProcessed += _lastRead;
+	_rfb.notify();
+      }
+    }
+
+    public synchronized int read() throws IOException {
+      flushProcessed();
+      int r = _is.read();
+      _lastRead = 1;
+      return r;
+    }
+
+    public synchronized long skip(long n) throws IOException {
+	throw new RuntimeException("CountingInputStream cannot skip");
+    }
+
+    public synchronized int read(byte[] b) throws IOException {
+	return read(b, 0, b.length);
+    }
+
+    public synchronized int read(byte[] b, int off, int len) throws IOException {
+	flushProcessed();
+	int r = _is.read(b, off, len);
+	_lastRead = r;
+	return r;
+    }
+  }
 
   //
   // Read the server message type
@@ -478,6 +536,20 @@ class RfbProto {
 	rec.writeByte(portion[i]);
 
     return len;
+  }
+
+  void readColourMapEntries() throws IOException {
+    // discard padding
+    is.readByte();
+
+    int firstColour = is.readUnsignedShort();
+    int nColours = is.readUnsignedShort();
+
+    for (int i = 0; i < nColours; i++) {
+      int r = is.readUnsignedShort();
+      int g = is.readUnsignedShort();
+      int b = is.readUnsignedShort();
+    }
   }
 
 

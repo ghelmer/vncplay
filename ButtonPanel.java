@@ -54,7 +54,8 @@ class ButtonPanel extends Panel implements ActionListener {
     clipboardButton.addActionListener(this);
     if (viewer.rec != null) {
       recordButton = new Button("Record");
-      add(recordButton);
+      // Don't add this record button to avoid confusion
+      //add(recordButton);
       recordButton.addActionListener(this);
     }
     ctrlAltDelButton = new Button("Send Ctrl-Alt-Del");
@@ -65,6 +66,14 @@ class ButtonPanel extends Panel implements ActionListener {
     refreshButton.setEnabled(false);
     add(refreshButton);
     refreshButton.addActionListener(this);
+
+    disconnectButton.setFocusable(false);
+    optionsButton.setFocusable(false);
+    if (recordButton != null)
+      recordButton.setFocusable(false);
+    clipboardButton.setFocusable(false);
+    ctrlAltDelButton.setFocusable(false);
+    refreshButton.setFocusable(false);
   }
 
   //

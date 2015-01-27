@@ -26,6 +26,7 @@ import java.awt.image.*;
 import java.io.*;
 import java.lang.*;
 import java.util.zip.*;
+import java.util.*;
 
 
 //
@@ -41,7 +42,7 @@ class VncCanvas extends Canvas
   Color[] colors;
   int bytesPixel;
 
-  Image memImage;
+  BufferedImage memImage;
   Graphics memGraphics;
 
   Image rawPixelsImage;
@@ -66,6 +67,15 @@ class VncCanvas extends Canvas
 
   // True if we process keyboard and mouse events.
   boolean inputEnabled;
+
+  // Flag to disable repaints for speed
+  boolean repaintEnabled = true;
+
+  // Used for watching sessions
+  private VncEventListener vncListener;
+  private boolean inputBlocked;
+  private java.util.List<InputEvent> holdQueue;
+  private java.util.Set<InputEvent> sentToListener = new HashSet<InputEvent>();
 
   //
   // The constructor.
@@ -93,6 +103,66 @@ class VncCanvas extends Canvas
     // Keyboard listener is enabled even in view-only mode, to catch
     // 'r' or 'R' key presses used to request screen update.
     addKeyListener(this);
+
+    inputBlocked = false;
+    
+    setFocusTraversalKeys(DefaultKeyboardFocusManager.FORWARD_TRAVERSAL_KEYS,
+			  new TreeSet());
+
+    setFocusTraversalKeys(DefaultKeyboardFocusManager.BACKWARD_TRAVERSAL_KEYS,
+			  new TreeSet());
+  }
+
+  public void setVncEventListener(VncEventListener l) {
+    vncListener = l;
+  }
+
+  public void setInputBlock(boolean v) {
+    inputBlocked = v;
+  }
+
+  public void holdInput() {
+    if (holdQueue != null)
+      return;
+
+    holdQueue = new ArrayList<InputEvent>();
+    sentToListener = new HashSet<InputEvent>();
+  }
+
+  public void releaseInput() {
+    if (holdQueue == null)
+      return;
+
+    java.util.List<InputEvent> q = holdQueue;
+    holdQueue = null;
+
+    // Some Linux applications, like Star Office, get confused when
+    // they get a flurry of input events in a row, like a mouse click
+    // immediately followed by a release.  So, try to maintain the
+    // same timing the events had when they were coming in.
+
+    InputEvent lastEvent = null;
+    long lastEventSent = 0;
+
+    for (InputEvent e: q) {
+      if (lastEvent != null) {
+	while ((e.getWhen() - lastEvent.getWhen()) >
+	       (System.currentTimeMillis() - lastEventSent)) {
+	  try {
+	    Thread.sleep(1);
+	  } catch (InterruptedException ie) {}
+	}
+      }
+
+      lastEvent = e;
+      lastEventSent = System.currentTimeMillis();
+
+      if (e instanceof KeyEvent)
+	processLocalKeyEvent((KeyEvent) e);
+      else if (e instanceof MouseEvent)
+	processLocalMouseEvent((MouseEvent) e, true);
+      else throw new RuntimeException("Unknown event type " + e.getClass().getName());
+    }
   }
 
   //
@@ -192,6 +262,10 @@ class VncCanvas extends Canvas
     updateFramebufferSize();
   }
 
+  public BufferedImage getBufferedImage() {
+    return memImage;
+  }
+
   void updateFramebufferSize() {
 
     // Useful shortcuts.
@@ -202,12 +276,14 @@ class VncCanvas extends Canvas
     // its geometry should be changed. It's not necessary to replace
     // existing image if only pixel format should be changed.
     if (memImage == null) {
-      memImage = viewer.createImage(fbWidth, fbHeight);
+      //memImage = viewer.createImage(fbWidth, fbHeight);
+      memImage = new BufferedImage(fbWidth, fbHeight, BufferedImage.TYPE_INT_ARGB);
       memGraphics = memImage.getGraphics();
     } else if (memImage.getWidth(null) != fbWidth ||
 	       memImage.getHeight(null) != fbHeight) {
       synchronized(memImage) {
-	memImage = viewer.createImage(fbWidth, fbHeight);
+	//memImage = viewer.createImage(fbWidth, fbHeight);
+        memImage = new BufferedImage(fbWidth, fbHeight, BufferedImage.TYPE_INT_ARGB);
 	memGraphics = memImage.getGraphics();
       }
     }
@@ -604,7 +680,7 @@ class VncCanvas extends Canvas
       }
 
       // Finished with a row of tiles, now let's show it.
-      scheduleRepaint(x, y, w, h);
+      scheduleRepaint(x, ty, w, th);
     }
   }
 
@@ -1157,8 +1233,11 @@ class VncCanvas extends Canvas
   //
 
   void scheduleRepaint(int x, int y, int w, int h) {
+    if (vncListener != null)
+      vncListener.screenEvent(x, y, w, h);
     // Request repaint, deferred if necessary.
-    repaint(viewer.deferScreenUpdates, x, y, w, h);
+    if (repaintEnabled)
+      repaint(viewer.deferScreenUpdates, x, y, w, h);
   }
 
   //
@@ -1166,26 +1245,28 @@ class VncCanvas extends Canvas
   //
 
   public void keyPressed(KeyEvent evt) {
-    processLocalKeyEvent(evt);
+    if (!inputBlocked) processLocalKeyEvent(evt);
+    evt.consume();
   }
   public void keyReleased(KeyEvent evt) {
-    processLocalKeyEvent(evt);
+    if (!inputBlocked) processLocalKeyEvent(evt);
+    evt.consume();
   }
   public void keyTyped(KeyEvent evt) {
     evt.consume();
   }
 
   public void mousePressed(MouseEvent evt) {
-    processLocalMouseEvent(evt, false);
+    if (!inputBlocked) processLocalMouseEvent(evt, false);
   }
   public void mouseReleased(MouseEvent evt) {
-    processLocalMouseEvent(evt, false);
+    if (!inputBlocked) processLocalMouseEvent(evt, false);
   }
   public void mouseMoved(MouseEvent evt) {
-    processLocalMouseEvent(evt, true);
+    if (!inputBlocked) processLocalMouseEvent(evt, true);
   }
   public void mouseDragged(MouseEvent evt) {
-    processLocalMouseEvent(evt, true);
+    if (!inputBlocked) processLocalMouseEvent(evt, true);
   }
 
   public void processLocalKeyEvent(KeyEvent evt) {
@@ -1204,6 +1285,22 @@ class VncCanvas extends Canvas
       } else {
 	// Input enabled.
 	synchronized(rfb) {
+	  if (holdQueue != null) {
+	    evt.consume();
+	    holdQueue.add(evt);
+	    return;
+	  }
+
+	  if (vncListener != null && !sentToListener.contains(evt))
+	    vncListener.keyEvent(evt);
+
+	  if (holdQueue != null) {
+	    evt.consume();
+	    holdQueue.add(evt);
+	    sentToListener.add(evt);
+	    return;
+	  }
+
 	  try {
 	    rfb.writeKeyEvent(evt);
 	  } catch (Exception e) {
@@ -1224,7 +1321,26 @@ class VncCanvas extends Canvas
 	softCursorMove(evt.getX(), evt.getY());
       }
       synchronized(rfb) {
+	if (holdQueue != null) {
+	  evt.consume();
+	  holdQueue.add(evt);
+	  return;
+	}
+
+	if (vncListener != null && !sentToListener.contains(evt))
+	  vncListener.mouseEvent(evt);
+
+	if (holdQueue != null) {
+	  evt.consume();
+	  holdQueue.add(evt);
+	  sentToListener.add(evt);
+	  return;
+	}
+
 	try {
+	  if (evt.getButton() != MouseEvent.NOBUTTON)
+	    System.out.println("sending button event at " + System.currentTimeMillis());
+
 	  rfb.writePointerEvent(evt);
 	} catch (Exception e) {
 	  e.printStackTrace();
@@ -1279,10 +1395,16 @@ class VncCanvas extends Canvas
 
     if (viewer.options.ignoreCursorUpdates) {
       if (encodingType == rfb.EncodingXCursor) {
-	rfb.is.skipBytes(6 + bytesMaskData * 2);
+	byte[] crud = new byte[6 + bytesMaskData * 2];
+	rfb.is.readFully(crud);
+	if (rfb.rec != null)
+	  rfb.rec.write(crud);
       } else {
 	// rfb.EncodingRichCursor
-	rfb.is.skipBytes(width * height + bytesMaskData);
+	byte[] crud = new byte[width * height + bytesMaskData];
+	rfb.is.readFully(crud);
+	if (rfb.rec != null)
+	  rfb.rec.write(crud);
       }
       return;
     }
@@ -1296,6 +1418,9 @@ class VncCanvas extends Canvas
       // Read foreground and background colors of the cursor.
       byte[] rgb = new byte[6];
       rfb.is.readFully(rgb);
+      if (rfb.rec != null)
+	rfb.rec.write(rgb);
+
       int[] colors = { (0xFF000000 | (rgb[3] & 0xFF) << 16 |
 			(rgb[4] & 0xFF) << 8 | (rgb[5] & 0xFF)),
 		       (0xFF000000 | (rgb[0] & 0xFF) << 16 |
@@ -1304,8 +1429,13 @@ class VncCanvas extends Canvas
       // Read pixel and mask data.
       byte[] pixBuf = new byte[bytesMaskData];
       rfb.is.readFully(pixBuf);
+      if (rfb.rec != null)
+	rfb.rec.write(pixBuf);
+
       byte[] maskBuf = new byte[bytesMaskData];
       rfb.is.readFully(maskBuf);
+      if (rfb.rec != null)
+	rfb.rec.write(maskBuf);
 
       // Decode pixel data into softCursorPixels[].
       byte pixByte, maskByte;
@@ -1340,8 +1470,13 @@ class VncCanvas extends Canvas
       // Read pixel and mask data.
       byte[] pixBuf = new byte[width * height * bytesPixel];
       rfb.is.readFully(pixBuf);
+      if (rfb.rec != null)
+	rfb.rec.write(pixBuf);
+
       byte[] maskBuf = new byte[bytesMaskData];
       rfb.is.readFully(maskBuf);
+      if (rfb.rec != null)
+	rfb.rec.write(maskBuf);
 
       // Decode pixel data into softCursorPixels[].
       byte pixByte, maskByte;

@@ -29,6 +29,7 @@ import java.awt.*;
 import java.awt.event.*;
 import java.io.*;
 import java.net.*;
+import java.util.concurrent.*;
 
 public class VncViewer extends java.applet.Applet
   implements java.lang.Runnable, WindowListener {
@@ -83,11 +84,22 @@ public class VncViewer extends java.applet.Applet
   String encPasswordParam;
   boolean showControls;
   boolean offerRelogin;
+  boolean autoRelogin;
   boolean showOfflineDesktop;
   int deferScreenUpdates;
   int deferCursorUpdates;
   int deferUpdateRequests;
 
+  VncInputRecorder inputRecorder;
+  VncInputPlayback inputPlayback;
+  boolean autoplayback = false;
+  boolean autorecord = false;
+  String traceFile = "record.log";
+  String recordFile = "vnc.log";
+
+  CountDownLatch _vcLatch = new CountDownLatch(1);
+  CountDownLatch _rfbLatch = new CountDownLatch(1);
+  boolean doExit = true;
 
   //
   // init()
@@ -131,6 +143,32 @@ public class VncViewer extends java.applet.Applet
   public void update(Graphics g) {
   }
 
+  public void inputRecordingStart() {
+    if (inputRecorder == null) {
+      inputRecorder = new VncInputRecorder(vc);
+    }
+  }
+
+  public void inputRecordingStop() {
+    if (inputRecorder != null) {
+      inputRecorder.stop();
+      inputRecorder = null;
+    }
+  }
+
+  public void inputPlaybackStart() {
+    if (inputPlayback == null) {
+      inputPlayback = new VncInputPlayback(vc);
+    }
+  }
+
+  public void inputPlaybackStop() {
+    if (inputPlayback != null) {
+      inputPlayback.stop();
+      inputPlayback = null;
+    }
+  }
+
   //
   // run() - executed by the rfbThread to deal with the RFB socket.
   //
@@ -148,6 +186,11 @@ public class VncViewer extends java.applet.Applet
       buttonPanel = new ButtonPanel(this);
       gridbag.setConstraints(buttonPanel, gbc);
       vncContainer.add(buttonPanel);
+    }
+
+    if (autoplayback) {
+      System.out.println("Auto-playback: recording into " + recordFile);
+      setRecordingStatus(recordFile);
     }
 
     try {
@@ -192,7 +235,18 @@ public class VncViewer extends java.applet.Applet
       if (showControls)
 	buttonPanel.enableButtons();
 
+      if (autoplayback) {
+	inputPlaybackStart();
+	inputPlayback.setAutoExit(true);
+      }
+
+      if (autorecord) {
+	inputRecordingStart();
+      }
+
       moveFocusToDesktop();
+
+      _vcLatch.countDown();
       vc.processNormalProtocol();
 
     } catch (NoRouteToHostException e) {
@@ -346,6 +400,8 @@ public class VncViewer extends java.applet.Applet
   boolean tryAuthenticate(String pw) throws Exception {
 
     rfb = new RfbProto(host, port, this);
+
+    _rfbLatch.countDown();
 
     rfb.readVersionMsg();
 
@@ -586,11 +642,33 @@ public class VncViewer extends java.applet.Applet
     if (str != null && str.equalsIgnoreCase("No"))
       offerRelogin = false;
 
+    autoRelogin = false;
+    str = readParameter("auto relogin", false);
+    if (str != null && str.equalsIgnoreCase("yes"))
+      autoRelogin = true;
+
     // Do we continue showing desktop on remote disconnect?
     showOfflineDesktop = false;
     str = readParameter("Show Offline Desktop", false);
     if (str != null && str.equalsIgnoreCase("Yes"))
       showOfflineDesktop = true;
+
+    // Do we automatically want to start playback?
+    str = readParameter("autoplay", false);
+    if (str != null)
+      autoplayback = true;
+
+    str = readParameter("autorecord", false);
+    if (str != null)
+      autorecord = true;
+
+    str = readParameter("tracefile", false);
+    if (str != null)
+      traceFile = str;
+
+    str = readParameter("recordfile", false);
+    if (str != null)
+      recordFile = str;
 
     // Fine tuning options.
     deferScreenUpdates = readIntParameter("Defer screen updates", 20);
@@ -671,7 +749,10 @@ public class VncViewer extends java.applet.Applet
     if (inAnApplet) {
       showMessage("Disconnected");
     } else {
-      System.exit(0);
+      if (doExit) {
+	inputRecordingStop();
+	System.exit(0);
+      }
     }
   }
 
@@ -687,7 +768,10 @@ public class VncViewer extends java.applet.Applet
       // can not present the error to the user.
       Thread.currentThread().stop();
     } else {
-      System.exit(1);
+      if (doExit) {
+	inputRecordingStop();
+	System.exit(1);
+      }
     }
   }
 
@@ -709,7 +793,10 @@ public class VncViewer extends java.applet.Applet
     if (inAnApplet) {
       showMessage(str);
     } else {
-      System.exit(1);
+      if (doExit) {
+	inputRecordingStop();
+	System.exit(1);
+      }
     }
   }
 
@@ -723,7 +810,11 @@ public class VncViewer extends java.applet.Applet
     Label errLabel = new Label(msg, Label.CENTER);
     errLabel.setFont(new Font("Helvetica", Font.PLAIN, 12));
 
-    if (offerRelogin) {
+    if (autoRelogin) {
+
+      getAppletContext().showDocument(getDocumentBase());
+
+    } else if (offerRelogin) {
 
       Panel gridPanel = new Panel(new GridLayout(0, 1));
       Panel outerPanel = new Panel(new FlowLayout(FlowLayout.LEFT));
@@ -778,7 +869,10 @@ public class VncViewer extends java.applet.Applet
 
     vncFrame.dispose();
     if (!inAnApplet) {
-      System.exit(0);
+      if (doExit) {
+	inputRecordingStop();
+	System.exit(0);
+      }
     }
   }
 
